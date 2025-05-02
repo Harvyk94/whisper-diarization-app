@@ -1,0 +1,10 @@
+streamlit
+git+https://github.com/m-bain/whisperx.git@main
+torch
+python-docx
+pandas
+streamlit-webrtc
+numpy
+soundfile
+pyannote.audio>=3.1,<3.2
+# Note: ffmpeg also needs to be installed system-wide (see README) 
