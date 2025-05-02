@@ -96,10 +96,14 @@ def load_diarization_model():
         return None # Ensure None is returned on any error
 
 def process_audio_with_diarization(audio_file, whisper_model, diarize_model, timestamp_freq):
-    """Process audio file, transcribe, align, diarize, and format output."""
+    """Process audio file, transcribe, align, diarize, and format output.
+    Returns:
+        tuple: (highlighted_html, clean_text, segments_data)
+            segments_data is a list of dicts: [{'start': float, 'end': float, 'speaker': str, 'text': str}]
+    """
     if whisper_model is None or diarize_model is None:
         st.error("Models not loaded properly. Cannot process audio.")
-        return "Error: Models not loaded.", "Error: Models not loaded."
+        return "Error: Models not loaded.", "Error: Models not loaded.", [] # Return empty list
 
     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
         tmp_file.write(audio_file.getvalue())
@@ -141,6 +145,7 @@ def process_audio_with_diarization(audio_file, whisper_model, diarize_model, tim
         processed_text_clean = []
         current_speaker = None
         last_timestamp_marker = -timestamp_freq # Initialize to ensure first timestamp shows
+        segments_data_for_csv = [] # Initialize list for structured data
 
         speaker_colors = [
             "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
@@ -162,8 +167,10 @@ def process_audio_with_diarization(audio_file, whisper_model, diarize_model, tim
 
             segment_speaker = segment.get("speaker", "UNKNOWN")
             if segment_speaker != current_speaker:
-                 processed_text_html.append(f"<br><b>{segment_speaker}:</b> ")
-                 processed_text_clean.append(f"\n{segment_speaker}: ")
+                 # Add timestamp when speaker changes
+                 speaker_start_ts = format_timestamp(segment["start"])
+                 processed_text_html.append(f'<br><b>{segment_speaker} [{speaker_start_ts}]:</b> ') # Added timestamp
+                 processed_text_clean.append(f'\n{segment_speaker} [{speaker_start_ts}]: ') # Added timestamp
                  current_speaker = segment_speaker
 
             speaker_color_index = int(segment_speaker.split('_')[1]) % len(speaker_colors) if "SPEAKER_" in segment_speaker else 0
@@ -172,17 +179,31 @@ def process_audio_with_diarization(audio_file, whisper_model, diarize_model, tim
             # Process words within the segment
             segment_html = []
             segment_clean = []
+            segment_words = [] # To collect words for CSV
             for word_info in segment['words']:
                 word = word_info['word']
                 # Apply filler word highlighting logic here for HTML
                 highlighted_word_html, _ = highlight_filler_words(word, inline=True) # Pass inline=True
                 segment_html.append(highlighted_word_html)
                 segment_clean.append(word)
+                segment_words.append(word) # Add word to list
 
             # Join words for the segment, prepending speaker tag and color
             joined_segment_html = " ".join(segment_html)
+            joined_segment_clean = " ".join(segment_clean)
+            joined_segment_words = " ".join(segment_words).strip() # Join words for CSV text
+
             processed_text_html.append(f'<span style="color: {speaker_color}">{joined_segment_html}</span>')
-            processed_text_clean.append(" ".join(segment_clean))
+            processed_text_clean.append(joined_segment_clean)
+
+            # Append structured data for this segment
+            if joined_segment_words: # Only add if there's text
+                segments_data_for_csv.append({
+                    'start': segment['start'],
+                    'end': segment['end'],
+                    'speaker': segment_speaker,
+                    'text': joined_segment_words
+                })
 
 
         full_highlighted_text = "".join(processed_text_html).strip().replace("<br>", "\n") # Use \n for cleaner spacing
@@ -192,13 +213,13 @@ def process_audio_with_diarization(audio_file, whisper_model, diarize_model, tim
         full_highlighted_text = full_highlighted_text.replace("\n\n","\n").replace("\n ", "\n")
 
 
-        return full_highlighted_text, full_clean_text
+        return full_highlighted_text, full_clean_text, segments_data_for_csv # Return structured data
 
     except Exception as e:
         st.error(f"Error during transcription/diarization: {str(e)}")
         import traceback
         st.error(traceback.format_exc()) # Print full traceback for debugging
-        return "Error during processing.", "Error during processing."
+        return "Error during processing.", "Error during processing.", [] # Return empty list on error
     finally:
         os.unlink(tmp_path)
 
@@ -286,8 +307,14 @@ def create_word_document(text, segments_data=None): # Allow passing structured d
             speaker_run = current_paragraph.add_run(f"{speaker}: ")
             speaker_run.font.bold = True
             if "SPEAKER_" in speaker:
-                 speaker_index = int(speaker.split('_')[1]) % len(speaker_colors_word)
-                 speaker_run.font.color.rgb = speaker_colors_word[speaker_index]
+                 # Extract only the numeric part before the timestamp
+                 try:
+                     speaker_number_str = speaker.split('_')[1].split(' ')[0]
+                     speaker_index = int(speaker_number_str) % len(speaker_colors_word)
+                     speaker_run.font.color.rgb = speaker_colors_word[speaker_index]
+                 except (IndexError, ValueError):
+                     # Fallback if parsing fails (should not happen with expected format)
+                     speaker_run.font.color.rgb = RGBColor(128, 128, 128) # Grey
             else: # UNKNOWN speaker
                  speaker_run.font.color.rgb = RGBColor(128, 128, 128) # Grey
 
@@ -331,6 +358,26 @@ def create_word_document(text, segments_data=None): # Allow passing structured d
 
     return doc
 
+# --- Add CSV Formatting Function ---
+def create_csv_data(segments_data):
+    """Formats segment data into a CSV string."""
+    if not segments_data:
+        return ""
+
+    data_for_df = []
+    for segment in segments_data:
+        start_ts = format_timestamp(segment['start'])
+        end_ts = format_timestamp(segment['end'])
+        timestamp_range = f"[{start_ts} - {end_ts}]"
+        data_for_df.append({
+            "Timestamp [Start - End]": timestamp_range,
+            "Speaker": segment['speaker'],
+            "Transcript": segment['text']
+        })
+
+    df = pd.DataFrame(data_for_df)
+    return df.to_csv(index=False)
+
 # --- Global variables or Session State for Live Recording ---
 # Use session state to hold audio buffer across reruns
 if 'audio_buffer' not in st.session_state:
@@ -338,7 +385,7 @@ if 'audio_buffer' not in st.session_state:
 if 'is_recording' not in st.session_state:
     st.session_state.is_recording = False
 if 'live_transcription_results' not in st.session_state:
-    st.session_state.live_transcription_results = (None, None) # (highlighted, clean)
+    st.session_state.live_transcription_results = (None, None, None) # (highlighted, clean, segments_data)
 # Add state for audio level
 if 'audio_level' not in st.session_state:
     st.session_state.audio_level = 0.0
@@ -434,7 +481,7 @@ def main():
             if st.button("🎯 Transcribe & Diarize File", use_container_width=True):
                 if whisper_model and diarize_model:
                     with st.spinner("Processing Uploaded Audio..."):
-                        highlighted_transcript, clean_transcript = process_audio_with_diarization(
+                        highlighted_transcript, clean_transcript, segments_data = process_audio_with_diarization(
                             audio_file, whisper_model, diarize_model, timestamp_freq
                         )
                         doc = create_word_document(clean_transcript)
@@ -465,6 +512,13 @@ def main():
                                     data=doc_buffer,
                                     file_name="transcript_diarized.docx",
                                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                )
+                                csv_data = create_csv_data(segments_data)
+                                st.download_button(
+                                    label="📥 Download as CSV",
+                                    data=csv_data,
+                                    file_name="transcript_diarized.csv",
+                                    mime="text/csv"
                                 )
                         with sub_tab2:
                             st.text_area("Clean Transcript with Speakers", clean_transcript, height=300)
@@ -517,7 +571,7 @@ def main():
                 if webrtc_ctx and webrtc_ctx.state.playing:
                     st.session_state.is_recording = True
                     st.session_state.audio_buffer = queue.Queue() # Clear previous buffer
-                    st.session_state.live_transcription_results = (None, None)
+                    st.session_state.live_transcription_results = (None, None, None)
                     st.write("DEBUG: Start Recording button pressed.") # DEBUG
                     st.rerun()
                 else:
@@ -599,11 +653,11 @@ def main():
                 if whisper_model and diarize_model:
                      st.write("DEBUG: Models loaded, calling process_audio_with_diarization...") # DEBUG log
                      with st.spinner("Transcribing live audio..."):
-                        highlighted, clean = process_audio_with_diarization(
+                        highlighted, clean, segments_data = process_audio_with_diarization(
                             mock_audio_file, whisper_model, diarize_model, timestamp_freq
                         )
                         st.write("DEBUG: process_audio_with_diarization finished.") # DEBUG log
-                        st.session_state.live_transcription_results = (highlighted, clean)
+                        st.session_state.live_transcription_results = (highlighted, clean, segments_data)
 
                         # Clean up temp file
                         try:
@@ -630,6 +684,8 @@ def main():
                      while not st.session_state.audio_buffer.empty():
                          st.session_state.audio_buffer.get()
                      st.write("DEBUG: Audio buffer cleared on model load error.") # DEBUG log
+                     # Clear results on error
+                     st.session_state.live_transcription_results = (None, None, None)
             else:
                 st.warning("No audio data recorded.")
                 status_indicator.warning("No audio data recorded.") # Update status too
@@ -637,11 +693,13 @@ def main():
                 while not st.session_state.audio_buffer.empty():
                     st.session_state.audio_buffer.get()
                 st.write("DEBUG: Audio buffer cleared because no data was recorded.") # DEBUG log
+                # Clear results if no data
+                st.session_state.live_transcription_results = (None, None, None)
 
         # Display live transcription results
         if st.session_state.live_transcription_results[0]:
             st.subheader("Live Transcription Result:")
-            hl_text, cl_text = st.session_state.live_transcription_results
+            hl_text, cl_text, segments_data = st.session_state.live_transcription_results
             st.markdown(hl_text, unsafe_allow_html=True)
             # Optionally add download buttons for live results too
             st.download_button(
@@ -650,6 +708,18 @@ def main():
                 file_name="live_transcript.txt",
                 mime="text/plain"
             )
+
+            # Add CSV download for live results
+            if segments_data:
+                csv_data_live = create_csv_data(segments_data)
+                st.download_button(
+                    label="📥 Download Live Transcript (CSV)",
+                    data=csv_data_live,
+                    file_name="live_transcript.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.info("No segment data available for CSV export (Live).", icon="ℹ️")
 
 if __name__ == "__main__":
     main() # Keep this line 
