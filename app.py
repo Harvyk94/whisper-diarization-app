@@ -434,6 +434,16 @@ def main():
 
     st.title("📝 Speech-to-Text & Diarization App") # Updated title
 
+    # --- Initialize session state for uploaded file results --- #
+    if 'uploaded_transcript_hl' not in st.session_state:
+        st.session_state.uploaded_transcript_hl = None
+    if 'uploaded_transcript_clean' not in st.session_state:
+        st.session_state.uploaded_transcript_clean = None
+    if 'uploaded_segments_data' not in st.session_state:
+        st.session_state.uploaded_segments_data = None
+    if 'processed_file_name' not in st.session_state:
+         st.session_state.processed_file_name = None
+
     # --- Sidebar remains the same --- #
     st.sidebar.header("Settings")
     whisper_model_name = st.sidebar.selectbox(
@@ -478,58 +488,113 @@ def main():
 
         if audio_file is not None:
             st.audio(audio_file)
+
+            # Clear previous results if a new file is uploaded
+            if st.session_state.processed_file_name != audio_file.name:
+                 st.write("DEBUG: New file detected, clearing previous state.") # DEBUG
+                 st.session_state.uploaded_transcript_hl = None
+                 st.session_state.uploaded_transcript_clean = None
+                 st.session_state.uploaded_segments_data = None
+                 st.session_state.processed_file_name = None # Reset processed file name
+
             if st.button("🎯 Transcribe & Diarize File", use_container_width=True):
                 if whisper_model and diarize_model:
                     with st.spinner("Processing Uploaded Audio..."):
                         highlighted_transcript, clean_transcript, segments_data = process_audio_with_diarization(
                             audio_file, whisper_model, diarize_model, timestamp_freq
                         )
-                        doc = create_word_document(clean_transcript)
-                        doc_buffer = io.BytesIO()
-                        doc.save(doc_buffer)
-                        doc_buffer.seek(0)
-
-                        sub_tab1, sub_tab2 = st.tabs(["Speaker Transcript (Highlighted)", "Speaker Transcript (Clean)"])
-                        with sub_tab1:
-                            st.markdown(highlighted_transcript, unsafe_allow_html=True)
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                # Fix: Replace newline outside f-string
-                                highlighted_transcript_html = highlighted_transcript.replace('\n', '<br>')
-                                html_data = f"""
-                                <!DOCTYPE html>
-                                <html> <head> <title>Transcript</title> <style> body {{ font-family: sans-serif; }} span[style*="background-color"] {{ padding: 1px 3px; border-radius: 3px; }} b {{ font-weight: bold; }} </style> </head> <body> {highlighted_transcript_html} </body> </html>
-                                """
-                                st.download_button(
-                                    label="📥 Download as HTML",
-                                    data=html_data,
-                                    file_name="transcript_diarized.html",
-                                    mime="text/html"
-                                )
-                            with col2:
-                                st.download_button(
-                                    label="📥 Download as Word",
-                                    data=doc_buffer,
-                                    file_name="transcript_diarized.docx",
-                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                                )
-                                csv_data = create_csv_data(segments_data)
-                                st.download_button(
-                                    label="📥 Download as CSV",
-                                    data=csv_data,
-                                    file_name="transcript_diarized.csv",
-                                    mime="text/csv"
-                                )
-                        with sub_tab2:
-                            st.text_area("Clean Transcript with Speakers", clean_transcript, height=300)
-                            st.download_button(
-                                label="📥 Download Clean Transcript",
-                                data=clean_transcript,
-                                file_name="transcript_diarized.txt",
-                                mime="text/plain"
-                            )
+                        # Store results in session state
+                        st.session_state.uploaded_transcript_hl = highlighted_transcript
+                        st.session_state.uploaded_transcript_clean = clean_transcript
+                        st.session_state.uploaded_segments_data = segments_data
+                        st.session_state.processed_file_name = audio_file.name # Mark this file as processed
+                        st.write("DEBUG: Processing complete, results stored in session state.") # DEBUG
+                        # Rerun to display results immediately after processing
+                        st.rerun()
                 else:
                     st.error("Models failed to load. Cannot transcribe file.")
+                    # Clear potentially stale results on model load failure
+                    st.session_state.uploaded_transcript_hl = None
+                    st.session_state.uploaded_transcript_clean = None
+                    st.session_state.uploaded_segments_data = None
+                    st.session_state.processed_file_name = None
+
+            # --- Display results (outside the button 'if', reads from session state) ---
+            # Only display if the currently loaded file matches the processed file in state
+            if st.session_state.processed_file_name == audio_file.name and st.session_state.uploaded_transcript_hl:
+                 st.write("DEBUG: Displaying results from session state.") # DEBUG
+                 # Create doc from session state data before showing tabs
+                 # Ensure clean text exists before creating doc
+                 if st.session_state.uploaded_transcript_clean:
+                     doc = create_word_document(st.session_state.uploaded_transcript_clean)
+                     doc_buffer = io.BytesIO()
+                     doc.save(doc_buffer)
+                     doc_buffer.seek(0)
+                 else: 
+                     doc_buffer = None # Handle case where clean text might be missing
+
+                 # Create CSV data from session state data
+                 # Ensure segment data exists
+                 if st.session_state.uploaded_segments_data:
+                     csv_data = create_csv_data(st.session_state.uploaded_segments_data)
+                 else:
+                     csv_data = None # Handle case where segment data might be missing
+                 
+                 # Extract base filename for download buttons
+                 base_filename = os.path.splitext(st.session_state.processed_file_name)[0]
+
+                 sub_tab1, sub_tab2 = st.tabs(["Speaker Transcript (Highlighted)", "Speaker Transcript (Clean)"])                 
+                 with sub_tab1:
+                      st.markdown(st.session_state.uploaded_transcript_hl, unsafe_allow_html=True)
+                      col1, col2, col3 = st.columns(3) # Use 3 columns for downloads
+                      with col1:
+                           # Fix: Replace newline outside f-string
+                           highlighted_transcript_html = st.session_state.uploaded_transcript_hl.replace('\n', '<br>')
+                           html_data = f"""
+                           <!DOCTYPE html>
+                           <html> <head> <title>Transcript</title> <style> body {{ font-family: sans-serif; }} span[style*="background-color"] {{ padding: 1px 3px; border-radius: 3px; }} b {{ font-weight: bold; }} </style> </head> <body> {highlighted_transcript_html} </body> </html>
+                           """
+                           st.download_button(
+                               label="📥 Download as HTML",
+                               data=html_data,
+                               file_name=f"{base_filename}_transcript.html", # Use processed filename
+                               mime="text/html",
+                               key="download_html_upload" # Add unique key
+                           )
+                      with col2:
+                           if doc_buffer:
+                               st.download_button(
+                                   label="📥 Download as Word",
+                                   data=doc_buffer,
+                                   file_name=f"{base_filename}_transcript.docx", # Use processed filename
+                                   mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                   key="download_word_upload" # Add unique key
+                               )
+                           else: 
+                               st.info("Word doc could not be generated.")
+                      with col3: # Add column for CSV download
+                           if csv_data is not None:
+                               st.download_button(
+                                   label="📥 Download as CSV",
+                                   data=csv_data,
+                                   file_name=f"{base_filename}_transcript.csv", # Use processed filename
+                                   mime="text/csv",
+                                   key="download_csv_upload" # Add unique key
+                               )
+                           else:
+                               st.info("CSV data could not be generated.")
+                 with sub_tab2:
+                      st.text_area("Clean Transcript with Speakers", st.session_state.uploaded_transcript_clean, height=300)
+                      st.download_button(
+                          label="📥 Download Clean Transcript (TXT)",
+                          data=st.session_state.uploaded_transcript_clean,
+                          file_name=f"{base_filename}_transcript.txt", # Use processed filename
+                          mime="text/plain",
+                          key="download_txt_upload" # Add unique key
+                      )
+            # Optional: Add a message if processing was triggered but failed silently
+            # elif st.session_state.processed_file_name == audio_file.name:
+            #      st.info("Processing completed, but no results to display.")
 
     # --- Live Recording Tab --- #
     with tab_live:
@@ -702,24 +767,28 @@ def main():
             hl_text, cl_text, segments_data = st.session_state.live_transcription_results
             st.markdown(hl_text, unsafe_allow_html=True)
             # Optionally add download buttons for live results too
-            st.download_button(
-                label="📥 Download Live Transcript (TXT)",
-                data=cl_text,
-                file_name="live_transcript.txt",
-                mime="text/plain"
-            )
-
-            # Add CSV download for live results
-            if segments_data:
-                csv_data_live = create_csv_data(segments_data)
+            col1_live, col2_live = st.columns(2) # Columns for live downloads
+            with col1_live:
                 st.download_button(
-                    label="📥 Download Live Transcript (CSV)",
-                    data=csv_data_live,
-                    file_name="live_transcript.csv",
-                    mime="text/csv"
+                    label="📥 Download Live Transcript (TXT)",
+                    data=cl_text,
+                    file_name="live_transcript.txt",
+                    mime="text/plain",
+                    key="download_txt_live" # Add unique key
                 )
-            else:
-                st.info("No segment data available for CSV export (Live).", icon="ℹ️")
+            with col2_live:
+                # Add CSV download for live results
+                if segments_data:
+                    csv_data_live = create_csv_data(segments_data)
+                    st.download_button(
+                        label="📥 Download Live Transcript (CSV)",
+                        data=csv_data_live,
+                        file_name="live_transcript.csv",
+                        mime="text/csv",
+                        key="download_csv_live" # Add unique key
+                    )
+                else:
+                    st.info("No segment data available for CSV export (Live).", icon="ℹ️")
 
 if __name__ == "__main__":
     main() # Keep this line 
